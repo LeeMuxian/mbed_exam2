@@ -65,12 +65,10 @@ Config config;
 void accele_cap(Arguments *in, Reply *Out);
 void thread_accele_cap(void);
 void extract_analize(void);
-/*void angle_det(Arguments *in, Reply *Out);
-void thread_angle(void);*/
 void stop_mode(Arguments *in, Reply *Out);
 
 void publish_gesture(MQTT::Client<MQTTNetwork, Countdown>* client);
-//void publish_tilt(MQTT::Client<MQTTNetwork, Countdown>* client, double angle);
+void publish_feature(MQTT::Client<MQTTNetwork, Countdown>* client, bool change_over_ThreAngle, bool change_over_ThrePoint);
 void messageArrived(MQTT::MessageData& md);
 
 int PredictGesture(float* output);
@@ -80,20 +78,17 @@ DigitalOut led1(LED1);  // stand for gesture_UI mode
 BufferedSerial pc(USBTX, USBRX);
 uLCD_4DGL uLCD(D1, D0, D2); // connection of uLCD
 RPCFunction rpc_accele_cap(&accele_cap, "accele_cap");
-//RPCFunction rpc_angle_det(&angle_det, "angle_det");
 RPCFunction rpc_stop_mode(&stop_mode, "stop_mode");
 WiFiInterface *wifi;
 MQTT::Client<MQTTNetwork, Countdown> *pointer_client;   // for the use in publish_Threshold function
-//Thread tRPC_ges, tRPC_angle;
 int gesture_ID;
 int num_gesture;
-float *accele;
+float *accele = NULL;
 volatile int message_num = 0;
 volatile int arrivedcount = 0;
 volatile bool closed = false;
 int Threshold_angle = 30;
 int Threshold_point = 15;
-int num_tilt = 0;
 bool stop = false;
 int i = ((SIZE_X / 5) - 6) / 2 - 1;     // coordinate of cursor on ulCD
 int j = ((SIZE_Y / 7) - 1) / 2 - 1;
@@ -111,8 +106,6 @@ const char* topic2 = "Mbed/feature";
 int main()
 {
     led1 = 0;   // initialize the three LED
-    led2 = 0;
-    led3 = 0;
 
     BSP_ACCELERO_Init();        // The accelerometer need to be initialized first.
     
@@ -220,7 +213,7 @@ void accele_cap(Arguments *in, Reply *Out) {
     Threshold_angle = 30;
 
     t1.start(thread_accele_cap);
-    t2.start(extract_analyize);
+//t2.start(extract_analize);
 
     // ----------------- wait for command to jump out of this mode --------------------
     char Threshold_buf[256], Threshold_outbuf[256]; // for RPC call
@@ -239,12 +232,14 @@ void accele_cap(Arguments *in, Reply *Out) {
             Threshold_buf[i] = fputc(recv, devout);
         }
         RPC::call(Threshold_buf, Threshold_outbuf);
+        stop = false;
         if (stop == true)
-            t1.terminate();
-            t2.terminate();
+            //t1.terminate();
+            //t2.terminate();
             break;
     }
     stop = false;
+    while (1);
     // ---------------------------- end of waiting -------------------------------------
 
     uLCD.cls();
@@ -346,24 +341,24 @@ void thread_accele_cap(void) {
         should_clear_buffer = gesture_index < label_num;
 
         if (gesture_ID < 3 && gesture_ID >= 0) {
+            printf("i\r\n");
             uLCD.cls();
             uLCD.locate(i, j);
             uLCD.printf("%d", gesture_ID);
             accele = interpreter->output(0)->data.f;
             publish_gesture(pointer_client);
         }
-        gesture_ID = -1;
     }
 }
 
 void extract_analize(void) {
-    while (1) {
+    /*while (1) {
         if (accele != NULL) {
             bool change_over_ThreAngle = false, change_over_ThrePoint = false;
             int num_change_direction = 0;
-            int num_vector = length(accele) / 3;
+            int num_vector = (int)(sizeof(accele) / sizeof(float)) / 3;
             float XYZ[num_vector][3];
-            for (int i = 0; i < length(accele); i += 3) {
+            for (int i = 0; i < (int)(sizeof(accele) / sizeof(float)); i += 3) {
                 for (int index_XYZ = 0; index_XYZ < 3; index_XYZ++)
                     XYZ[i / 3][index_XYZ] = accele[i];
             }
@@ -383,7 +378,7 @@ void extract_analize(void) {
 
             accele = NULL;
         }
-    }
+    }*/
 }
 
 void publish_gesture(MQTT::Client<MQTTNetwork, Countdown>* client) {
@@ -416,99 +411,7 @@ void publish_feature(MQTT::Client<MQTTNetwork, Countdown>* client, bool change_o
     printf("Puslish message: %s\r\n", buff);
 }
 
-/*void angle_det(Arguments *in, Reply *Out) {
-    Thread t2;
-    led2 = 1;
-    num_tilt = 0;
-
-    t2.start(thread_angle);
-    while (1) {
-        uLCD.cls();
-        uLCD.locate(i, j);
-        uLCD.printf("%lf", angle);
-        if (num_tilt == 10)
-            break;
-    }
-    ThisThread::sleep_for(100ms);
-    t2.terminate();
-
-    // ----------------- wait for command to jump out of this mode --------------------
-    char angle_buf[256], angle_outbuf[256]; // for RPC call
-    FILE *devin = fdopen(&pc, "r");
-    FILE *devout = fdopen(&pc, "w");
-
-    memset(angle_outbuf, 0, 256);
-    while (1) {         // wait for Python to stop gesture UI mode.
-        memset(angle_buf, 0, 256);      // clear buffer
-        for(int i=0; i<255; i++) {
-            char recv = fgetc(devin);
-            if (recv == '\r' || recv == '\n') {
-                printf("\r\n");
-                break;
-            }
-            angle_buf[i] = fputc(recv, devout);
-        }
-        RPC::call(angle_buf, angle_outbuf);
-        if (stop == true)
-            break;
-    }
-    stop = false;
-    // ---------------------------- end of waiting -------------------------------------
-
-    led2 = 0;
-    uLCD.cls();
-    Out->putData("Jump out of tilt angle detection mode.");
-}
-
-void thread_angle(void) {
-    led3 = 0;
-
-    int16_t ref_XYZ[3] = {0};
-    int16_t tilt_XYZ[3] = {0};
-
-    // -----------------measure reference accele vector --------------
-    printf("measuring the reference acceleration vector\r\n");
-    printf("please put mbed on table\r\n");
-    led1 = 1;
-    ThisThread::sleep_for(2s);      // give user enough time to place mbed on the table
-    BSP_ACCELERO_AccGetXYZ(ref_XYZ);
-    printf("the reference acceleration vector is (%d, %d, %d)\r\n", ref_XYZ[0], ref_XYZ[1], ref_XYZ[2]);
-    led1 = 0;
-    // ------------- end of measure reference accele vector ----------
-
-    printf("please start to tilt the board\r\n");
-    led3 = 1;
-    while (1) {
-        BSP_ACCELERO_AccGetXYZ(tilt_XYZ);
-        angle = calculate_angle(ref_XYZ, tilt_XYZ);
-        if (angle >= Threshold_angle) {
-            publish_tilt(pointer_client, angle);
-            ++num_tilt;
-            printf("tilt angle is %lf degrees for the %d -th time\r\n", angle, num_tilt);
-            if (num_tilt == 10)
-                break;
-        }
-        ThisThread::sleep_for(100ms);
-    }
-    led3 = 0;
-}
-
-void publish_tilt(MQTT::Client<MQTTNetwork, Countdown>* client, double angle) {
-    MQTT::Message message;
-    char buff[100];
-    sprintf(buff, "The tilt angle over the threshold one is %lf", angle);
-    message.qos = MQTT::QOS0;
-    message.retained = false;
-    message.dup = false;
-    message.payload = (void*) buff;
-    message.payloadlen = strlen(buff) + 1;
-    int rc = client->publish(topic2, message);
-
-    printf("rc:  %d\r\n", rc);
-    printf("Puslish message: %s\r\n", buff);
-}*/
-
-double calculate_angle(int16_t ref_XYZ[3], int16_t tilt_XYZ[3]) {
+double calculate_angle(float ref_XYZ[3], float tilt_XYZ[3]) {
     double angle, cosine_angle;
 
     // I utilize the inner product of the two vectors

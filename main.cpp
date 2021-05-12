@@ -62,35 +62,37 @@ struct Config {
 Config config;
 #endif // CONFIG_H_
 
-void gesture_UI(Arguments *in, Reply *Out);
-void threshold_select(void);
-void angle_det(Arguments *in, Reply *Out);
-void thread_angle(void);
+void accele_cap(Arguments *in, Reply *Out);
+void thread_accele_cap(void);
+void extract_analize(void);
+/*void angle_det(Arguments *in, Reply *Out);
+void thread_angle(void);*/
 void stop_mode(Arguments *in, Reply *Out);
 
-void publish_Threshold(MQTT::Client<MQTTNetwork, Countdown>* client);
-void publish_tilt(MQTT::Client<MQTTNetwork, Countdown>* client, double angle);
+void publish_gesture(MQTT::Client<MQTTNetwork, Countdown>* client);
+//void publish_tilt(MQTT::Client<MQTTNetwork, Countdown>* client, double angle);
 void messageArrived(MQTT::MessageData& md);
 
 int PredictGesture(float* output);
 double calculate_angle(int16_t ref_XYZ[3], int16_t tilt_XYZ[3]);
 
 DigitalOut led1(LED1);  // stand for gesture_UI mode
-DigitalOut led2(LED2);  // stand for angle detection mode
-DigitalOut led3(LED3);  // if 1, user can begin to tilt the board
-DigitalIn confirm_select(USER_BUTTON);
 BufferedSerial pc(USBTX, USBRX);
 uLCD_4DGL uLCD(D1, D0, D2); // connection of uLCD
-RPCFunction rpc_gesture_UI(&gesture_UI, "gesture_UI");
-RPCFunction rpc_angle_det(&angle_det, "angle_det");
+RPCFunction rpc_accele_cap(&accele_cap, "accele_cap");
+//RPCFunction rpc_angle_det(&angle_det, "angle_det");
 RPCFunction rpc_stop_mode(&stop_mode, "stop_mode");
 WiFiInterface *wifi;
 MQTT::Client<MQTTNetwork, Countdown> *pointer_client;   // for the use in publish_Threshold function
-Thread tRPC_ges, tRPC_angle;
+//Thread tRPC_ges, tRPC_angle;
+int gesture_ID;
+int num_gesture;
+float *accele;
 volatile int message_num = 0;
 volatile int arrivedcount = 0;
 volatile bool closed = false;
 int Threshold_angle = 30;
+int Threshold_point = 15;
 int num_tilt = 0;
 bool stop = false;
 int i = ((SIZE_X / 5) - 6) / 2 - 1;     // coordinate of cursor on ulCD
@@ -103,8 +105,8 @@ constexpr int kTensorArenaSize = 60 * 1024;
 uint8_t tensor_arena[kTensorArenaSize];
 
 const char* topic = "Mbed";
-const char* topic1 = "Mbed/Threshold";
-const char* topic2 = "Mbed/angle_detected";
+const char* topic1 = "Mbed/gesture_ID";
+const char* topic2 = "Mbed/feature";
 
 int main()
 {
@@ -212,20 +214,13 @@ int main()
     return 0;
 }
 
-void gesture_UI(Arguments *in, Reply *Out) {
-    Thread t1;
+void accele_cap(Arguments *in, Reply *Out) {
+    Thread t1, t2;
     led1 = 1;
     Threshold_angle = 30;
 
-    t1.start(threshold_select);
-    while (confirm_select == 1) {
-        //uLCD.cls();
-        uLCD.locate(i, j);
-        uLCD.printf("%d", Threshold_angle);
-    }
-    t1.terminate();
-
-    publish_Threshold(pointer_client);
+    t1.start(thread_accele_cap);
+    t2.start(extract_analyize);
 
     // ----------------- wait for command to jump out of this mode --------------------
     char Threshold_buf[256], Threshold_outbuf[256]; // for RPC call
@@ -245,6 +240,8 @@ void gesture_UI(Arguments *in, Reply *Out) {
         }
         RPC::call(Threshold_buf, Threshold_outbuf);
         if (stop == true)
+            t1.terminate();
+            t2.terminate();
             break;
     }
     stop = false;
@@ -252,15 +249,14 @@ void gesture_UI(Arguments *in, Reply *Out) {
 
     uLCD.cls();
     led1 = 0;
-    Out->putData("Jump out of gesture UI mode.");
+    Out->putData("Jump out of accele_cap mode.");
 }
 
-void threshold_select(void) {
+void thread_accele_cap(void) {
     bool should_clear_buffer = false;
     bool got_data = false;
 
-    // The gesture index of the prediction
-    int gesture_index;
+    // gesture ID is a global variable
 
     // Set up logging.
     static tflite::MicroErrorReporter micro_error_reporter;
@@ -338,28 +334,62 @@ void threshold_select(void) {
         // Run inference, and report any error
         TfLiteStatus invoke_status = interpreter->Invoke();
         if (invoke_status != kTfLiteOk) {
-        error_reporter->Report("Invoke failed on index: %d\n", begin_index);
-        continue;
+            error_reporter->Report("Invoke failed on index: %d\n", begin_index);
+            continue;
         }
 
         // Analyze the results to obtain a prediction
-        gesture_index = PredictGesture(interpreter->output(0)->data.f);
+        gesture_ID = PredictGesture(interpreter->output(0)->data.f);
+        //accele = interpreter->output(0)->data.f;
+
         // Clear the buffer next time we read data
         should_clear_buffer = gesture_index < label_num;
 
-        if (gesture_index == 2 /*2 means the gesture of shaking*/) {
-            if (Threshold_angle < 60)
-                Threshold_angle += 5;
-            else if (Threshold_angle == 60)
-                Threshold_angle = 30;
+        if (gesture_ID < 3 && gesture_ID >= 0) {
+            uLCD.cls();
+            uLCD.locate(i, j);
+            uLCD.printf("%d", gesture_ID);
+            accele = interpreter->output(0)->data.f;
+            publish_gesture(pointer_client);
+        }
+        gesture_ID = -1;
+    }
+}
+
+void extract_analize(void) {
+    while (1) {
+        if (accele != NULL) {
+            bool change_over_ThreAngle = false, change_over_ThrePoint = false;
+            int num_change_direction = 0;
+            int num_vector = length(accele) / 3;
+            float XYZ[num_vector][3];
+            for (int i = 0; i < length(accele); i += 3) {
+                for (int index_XYZ = 0; index_XYZ < 3; index_XYZ++)
+                    XYZ[i / 3][index_XYZ] = accele[i];
+            }
+            for (int i = 1; i < num_vector; i++) {
+                double angle = calculate_angle(XYZ[i - 1], XYZ[i]);
+                if (angle > 5) {
+                    num_change_direction++;
+                }
+                if (angle >= Threshold_angle) {
+                    change_over_ThreAngle = true;
+                }
+            }
+            if (num_change_direction >= Threshold_point)
+                change_over_ThrePoint = true;
+
+            publish_feature(pointer_client, change_over_ThreAngle, change_over_ThrePoint);
+
+            accele = NULL;
         }
     }
 }
 
-void publish_Threshold(MQTT::Client<MQTTNetwork, Countdown>* client) {
+void publish_gesture(MQTT::Client<MQTTNetwork, Countdown>* client) {
     MQTT::Message message;
     char buff[100];
-    sprintf(buff, "The threshold angle is %d", Threshold_angle);
+    sprintf(buff, "The gesture is %d, and the number of events is %d", gesture_ID, num_gesture);
     message.qos = MQTT::QOS0;
     message.retained = false;
     message.dup = false;
@@ -371,7 +401,22 @@ void publish_Threshold(MQTT::Client<MQTTNetwork, Countdown>* client) {
     printf("Puslish message: %s\r\n", buff);
 }
 
-void angle_det(Arguments *in, Reply *Out) {
+void publish_feature(MQTT::Client<MQTTNetwork, Countdown>* client, bool change_over_ThreAngle, bool change_over_ThrePoint) {
+    MQTT::Message message;
+    char buff[100];
+    sprintf(buff, "The feature is %d and %d", change_over_ThreAngle, change_over_ThrePoint);
+    message.qos = MQTT::QOS0;
+    message.retained = false;
+    message.dup = false;
+    message.payload = (void*) buff;
+    message.payloadlen = strlen(buff) + 1;
+    int rc = client->publish(topic2, message);
+
+    printf("rc:  %d\r\n", rc);
+    printf("Puslish message: %s\r\n", buff);
+}
+
+/*void angle_det(Arguments *in, Reply *Out) {
     Thread t2;
     led2 = 1;
     num_tilt = 0;
@@ -461,7 +506,7 @@ void publish_tilt(MQTT::Client<MQTTNetwork, Countdown>* client, double angle) {
 
     printf("rc:  %d\r\n", rc);
     printf("Puslish message: %s\r\n", buff);
-}
+}*/
 
 double calculate_angle(int16_t ref_XYZ[3], int16_t tilt_XYZ[3]) {
     double angle, cosine_angle;
